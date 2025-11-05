@@ -1,0 +1,187 @@
+#!/bin/bash
+
+#
+SAF="$HOME/.safe"
+#
+
+VLT="$SAF/vault"
+BKP="$SAF/backup"
+TGT="$HOME/vault"
+STP=$(date +%y%m%d%H%M%S)
+RET="10"
+
+function help {
+	echo "Options:"
+	echo -e "\t-o [open]   - open vault"
+	echo -e "\t-c [close]  - close vault"
+	echo -e "\t-b [backup] - backup vault"
+	echo -e "\t-r [runes]  - backup runes"
+	echo -e "\t-h [help]   - this"
+}
+
+function init {
+	if ! command -v gocryptfs &>/dev/null; then
+		echo "error: gocryptfs not found"
+		exit 1
+	fi
+
+	if [[ ! -d $VLT ]] || [[ ! -d $BKP ]]; then
+		echo "error: dir paths"
+		exit 1
+	fi
+
+	if ! command -v fusermount3 &>/dev/null; then
+		echo "error: fusermount3 not found"
+		#exit 1
+	fi
+}
+
+open() {
+	if [[ ! -d $TGT ]]; then
+		mkdir -p $TGT
+	fi
+
+	if ! mountpoint -q $TGT; then
+		gocryptfs -q -i 5m -nosyslog $VLT $TGT
+		if [[ $? != 0 ]]; then
+			echo "error: mount $TGT"
+			exit 1
+		fi
+	fi
+}
+
+close() {
+	if mountpoint -q $TGT; then
+		fusermount3 -u $TGT
+		if [[ $? != 0 ]]; then
+			echo "error: unmount $TGT"
+			if mountpoint -q $TGT; then
+				echo "error: $TGT is mounted"
+				exit 1
+			fi
+		fi
+	fi
+
+}
+
+function backup {
+	close
+	cd $SAF
+
+	local name="vault"
+	local arc=${BKP}/${name}.${STP}.tgz
+	tar -chzf $arc $name
+	if [[ $? != 0 ]]; then
+		echo "error: archive"
+		rm -f $arc
+		exit 1
+	fi
+
+	local count=$(ls -1 ${BKP}/${name}* | wc -l)
+	if (($count > $RET)); then
+		rm -f $(ls -1 ${BKP}/${name}* | head -n -${RET})
+	fi
+}
+
+function runes {
+	open
+	cd $TGT
+
+	local name="runes"
+	if [[ ! -d $name ]]; then
+		echo "error: runes path"
+		exit 1
+	fi
+
+	local arc=${name}.${STP}.tgz
+	local cry=${arc}.asc
+
+	tar -czf $arc $name
+	if [[ $? != 0 ]]; then
+		echo "error: archive file"
+		rm -f $arc
+		exit 1
+	fi
+
+	gpg -sea $arc
+	if [[ $? != 0 ]]; then
+		echo "error: encrypt file"
+	else
+		mv $cry ${BKP}
+	fi
+
+	rm -f $arc
+	cat ${BKP}/${cry}
+}
+
+function update {
+	close
+	cd $SAF
+
+	local name="vault"
+	if [[ -L $name ]]; then
+		rm -f $name
+	fi
+
+	local name=$(ls -d -1 ${NAME}.* | grep '[[:digit:]]$' | head -n 1)
+
+	local first=$(ls -1r $BKP | head -n 1)
+	local first_stp=$(echo $first | cut -d'.' -f2)
+	local save=0
+	local res=0
+
+	if [[ -d $name ]]; then
+		echo "warn: vault present: save"
+		mv $name ${name}.save
+		if [[ $? != 0 ]]; then
+			echo "error: save vault"
+			exit 1
+		else
+			save=1
+		fi
+	fi
+
+	echo "info: restore $first"
+	tar -xJvf ${BKP}/${first}
+	if [[ ! -d $VLT ]]; then
+		echo "error: restore $first"
+		if [[ $save == 1 ]]; then
+			echo "info: restore saved"
+			if [[ ! -d $name ]]; then
+				mv ${name}.save $name
+			fi
+		fi
+	else
+		echo "info: link vault"
+		mv $NAME ${NAME}.${first_stp}
+		r=$?
+		ln -s ${NAME}.${first_stp} $NAME
+		r=$?
+		if [[ $r == 0 ]]; then
+			echo "info: success"
+		else
+			echo "error: link vault"
+		fi
+	fi
+}
+
+# main #
+
+init
+case $1 in
+-o | open)
+	open
+	;;
+-c | close)
+	close
+	;;
+-b | backup)
+	backup
+	;;
+-r | runes)
+	runes
+	;;
+*)
+	help
+	;;
+esac
