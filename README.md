@@ -1,1 +1,3 @@
-# Collection of small helper scripts
+# Collection of useful scripts
+
+lock - gocryptfs vault control
