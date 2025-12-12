@@ -1,0 +1,14 @@
+#! /bin/bash
+
+ROLES=$(aws iam list-roles | jq -r .Roles[].Arn)
+
+for ROLE in $ROLES; do 
+  echo $ROLE
+  JOBID=$(aws iam generate-service-last-accessed-details --arn $ROLE | jq -r .JobId)
+  echo $JOBID
+  NAMESPACES=$(aws iam get-service-last-accessed-details --job-id $JOBID | jq -r .ServicesLastAccessed[].ServiceNamespace)
+  for NAMESPACE in $NAMESPACES; do  
+    echo $NAMESPACE
+    aws iam get-service-last-accessed-details-with-entities --job-id $JOBID --service-namespace $NAMESPACE | jq '.JobCompletionDate,.EntityDetailsList[].EntityInfo.Name,.EntityDetailsList[].EntityInfo.Id'
+  done    
+done

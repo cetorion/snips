@@ -1,0 +1,25 @@
+#!/bin/bash
+
+export VAULT_ADDR="https://hcvault.com:8200"
+export VAULT_NAMESPACE="namespace"
+export VAULT_TOKEN=$(vault login \
+	-token-only \
+	-address=${VAULT_ADDR} \
+	-namespace=${VAULT_NAMESPACE} \
+	-method=aws)
+
+APP_NAME="app"
+APP_ENV="dev"
+APP_PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9!?%=' < /dev/urandom | head -c 16)
+
+APP_PATH="sec_kv/data/ese/${APP_NAME}/${APP_ENV}/app_secrets"
+vault write $APP_PATH - <<EOF
+{
+  "data": {
+    "rds_db_password": "$APP_PASS"
+  }
+}
+EOF
+
+vault read $APP_PATH
+

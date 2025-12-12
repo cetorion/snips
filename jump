@@ -1,0 +1,96 @@
+#!/bin/bash
+
+JEN_KEY="~/.ssh/jenkins-master"
+JEN_USR="ec2-user"
+DEP_PRF="deployer"
+BST_PRF="bastion"
+
+usage() {
+	echo "
+	Description:
+		SSH connection to various Jenkins nodes through bastion
+		Provides additional utility functions like listing Jenkins nodes
+	Usage:
+		${0##*/} [options]
+	Options:
+		-m						- jump to Jenkins master
+		-l						- list Jenkins agent nodes
+		-c						- jump to the first CI agent
+		-t						- jump to the first tooling agent
+		-b						- jump to Jenkins bastion
+	"
+}
+
+go_bastion() {
+	ssh -q $BST_PRF
+}
+
+go_deployer() {
+	ssh -q $DEP_PRF
+}
+
+set_master_ip() {
+	local cli='aws ec2 describe-instances
+		--filters "Name=tag:Name,Values=nef-jenkins-master-ecs-nonprod"
+		--query "Reservations[*].Instances[*].[PrivateIpAddress]"
+		--output text'
+
+	MASTER_IP=$(ssh -q $DEP_PRF $cli)
+}
+
+go_master() {
+	set_master_ip
+	#ssh -q -o ProxyCommand="ssh -q bastion-np -W %h:%p" -i $JM_KEY ${USER}@${MASTER_IP}
+	ssh -q -i $JEN_KEY -J $BST_PRF ${JEN_USR}@${MASTER_IP}
+}
+
+list_nodes() {
+	set_master_ip
+	local cli="docker ps | grep jenkins | cut -d' ' -f1 | xargs -i docker exec {} ls nodes"
+	#$SSH_RUN -o ProxyCommand="$JUMP_RUN -W %h:%p" -i $JM_KEY ${USER}@${MASTER_IP} $cli
+	ssh -q -i $JEN_KEY -J $BST_PRF ${JEN_USR}@${MASTER_IP} $cli
+}
+
+set_node_ip() {
+	local agent="Tooling agent"
+	if [[ ! -z $1 ]]; then
+		agent="CI agent"
+	fi
+
+	local node_id=$(list_nodes | grep -m 1 "$agent" | rev | cut -d' ' -f 1 | rev | tr -d '()')
+	local cli="aws ec2 describe-instances \
+		--instance-ids $node_id \
+		--query 'Reservations[*].Instances[*].PrivateIpAddress' \
+		--output text"
+	NODE_IP=$(ssh -q $DEP_PRF $cli)
+}
+
+go_node() {
+	set_node_ip $1
+	# $SSH_RUN -o ProxyCommand="$JUMP_RUN -W %h:%p" -i $JM_KEY ${USER}@${NODE_IP}
+	ssh -q -i $JEN_KEY -J $BST_PRF ${JEN_USR}@${NODE_IP}
+}
+
+# Main #
+
+case "$1" in
+-m)
+	go_master
+	;;
+-l)
+	list_nodes
+	;;
+-c)
+	go_node c
+	;;
+-t)
+	go_node
+	;;
+-b)
+	#go_bastion
+	set_master_ip
+	;;
+*)
+	usage
+	;;
+esac

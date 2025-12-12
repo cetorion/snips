@@ -1,0 +1,53 @@
+#!/bin/bash
+
+# Tag key to remove
+echo "Enter tag key to remove:"
+read TAG_KEY
+if [[ -z "$TAG_KEY" ]]; then
+	echo "error: tag key is empty"
+	exit 1
+fi
+
+# Buckets to remove the tag from - one or many
+echo "Enter S3 bucket list separated by spaces:"
+read -a S3
+if [[ ${#S3[@]} == 0 ]]; then
+	echo "error: empty bucket list"
+	exit 1
+fi
+
+rm_tag() {
+	local bucket=$1
+	local t_old="tags-old.json"
+	local t_new="tags-new.json"
+
+	# Save old tags
+	aws s3api get-bucket-tagging --bucket $bucket >$t_old
+	RES=$?
+	if [[ $RES != 0 ]]; then
+		echo "error: saving tags: $bucket"
+		exit 1
+	fi
+
+	# Delete tag
+	aws s3api get-bucket-tagging --bucket $bucket | jq "del(.TagSet[] | select(.Key == \"$TAG_KEY\"))" >$t_new
+	RES=$?
+	if [[ $RES != 0 ]]; then
+		echo "error: deleting tag: $bucket"
+		exit 1
+	fi
+
+	# Update tags
+	aws s3api put-bucket-tagging --bucket $bucket --tagging file://${t_new}
+	RES=$?
+	if [[ $RES != 0 ]]; then
+		echo "error: updating tag: $bucket"
+		exit 1
+	fi
+}
+
+# Iterate through S3 buckets
+for B in "${S3[@]}"; do
+	echo "info: processing: $B"
+	rm_tag $B
+done

@@ -1,0 +1,154 @@
+#!/bin/bash
+
+function usage {
+	echo "
+	Description:
+		Extracts PG DB data into CSV files using the SQL scripts provided
+		Creates a tar archive with the extracted data
+		Exports the archive to an S3 bucket or EFS volume
+
+		Without any options, it defaults to extract only without export to EFS or S3
+
+		DB credentials can be provided with PGUSER and PGPASSWORD env vars
+		Otherwise (if empty) they will be asked interactively
+
+		SQL scripts can provided as a single or multiple SQL file(s), a directory
+	Usage:
+		${0##*/} [options] <files...>
+	Options:
+		-s						- extract to S3
+		-e						- extract to EFS
+		-h						- this
+	"
+}
+
+EXP=''
+while (("$#")); do
+	case "$1" in
+	-s)
+		EXP='s3'
+		shift
+		;;
+	-e)
+		EXP='efs'
+		shift
+		;;
+	-h)
+		usage
+		exit 0
+		;;
+	*)
+		break
+		;;
+	esac
+done
+
+# Get config
+SPTH=$(realpath "$0")
+SDIR=$(dirname $SPTH)
+SBSE=$(basename $SPTH)
+CONF="${SDIR}/${SBSE%.*}.cfg"
+[[ ! -f $CONF ]] && echo "error: missing config file" && exit 1
+. $CONF
+
+# Get DB password
+if [[ -z $PGUSER ]] || [[ -z $PGPASSWORD ]]; then
+	echo 'Please, enter DB credentials'
+	echo ""
+	read -p 'Username: ' USER
+	read -sp 'Password: ' PASS
+	[[ -z $USER || -z $PASS ]] && echo 'error: credentials are empty' && exit 1
+	export PGUSER=$USER
+	export PGPASSWORD=$PASS
+	echo ""
+fi
+
+# Check passed parameters. One or multiple scripts or directory can be passed
+[[ $# < 1 ]] && echo "error: no sql scripts passed" && usage && exit 1
+
+# Process SQL scripts passed as parameters
+LIST=($@)
+if [[ -d $1 ]]; then
+	[[ ! $(ls -A $1) ]] && echo "error: $1 is empty" && exit 1
+	LIST=($(ls $(realpath -sq $1)/*))
+fi
+
+# Make sure psql is installed
+if ! command -v psql &>/dev/null; then
+	echo "warn: psql not found. installing..."
+	if ! sudo yum install -y rh-postgresql13-postgresql-syspaths &>/dev/null; then
+		echo "error: failed to install. psql >V12 is required"
+		exit 1
+	fi
+fi
+
+# Create CSV dump dir
+echo "info: create csv dir"
+CSV_DIR="$(pwd)/csv"
+mkdir -p $CSV_DIR
+[[ $? != 0 ]] && echo "error: create csv dir" && exit 1
+
+# Run CSV export
+for F in "${LIST[@]}"; do
+	[[ ! -f $F ]] && echo "error: $F is not a valid file" && exit 1
+	[[ ${F##*.} != 'sql' ]] && echo "error: $F: 'sql' extension required" && exit 1
+
+	N=${F%%.*}
+	echo "info: run $F"
+	psql -f $F -o ${CSV_DIR}/${N}.csv --csv
+	[[ $? != 0 ]] && echo "error: run $F" && exit 1
+done
+echo "info: export complete"
+
+# Check CSV dir
+[[ ! -d $CSV_DIR ]] && echo "error: $CSV_DIR not a directory" && exit 1
+[[ ! $(ls -A $CSV_DIR) ]] && echo "error: $CSV_DIR is empty" && exit 1
+
+# Check if export is required
+if [[ -z $EXP ]]; then
+	echo "info: extract complete"
+	exit 0
+fi
+
+# Create csv tar file
+echo "info: create csv tar file"
+TARBALL="csv-dump-$(date +%y%m%d%H%M%S).tgz"
+tar -czf $TARBALL -C $CSV_DIR .
+[[ $? != 0 ]] && echo "error: create csv tar file" && exit 1
+
+# Export to S3
+function s3_export {
+	echo "info: copy to S3 bucket"
+	aws s3 cp $TARBALL s3://$S3_BUCKET --sse aws:kms --sse-kms-key-id $KMS_KEY_ID --quiet
+	[[ $? != 0 ]] && echo "error: copy to S3 bucket" && exit 1
+	echo "info: $(aws s3 ls s3://$S3_BUCKET | grep $TARBALL)"
+}
+
+# Export to EFS
+function efs_export {
+	# Check for nfs-utils
+	if ! command -v nfs-utils &>/dev/null; then
+		echo "warn: nfs-utils not found. installing..."
+		sudo yum -y --nogpgcheck install nfs-utils
+		[[ $? != 0 ]] && echo "error: install nfs-utils" && exit 1
+	fi
+
+	# Mount EFS
+	EFS_MNT_DIR="efs-mount-${RANDOM}"
+	mkdir -p $EFS_MNT_DIR
+	sudo mount -t nfs ${EFS_TGT_IP}:/ $EFS_MNT_DIR
+	[[ $? != 0 ]] && echo "error: mount efs volume" && exit 1
+	cp $TARBALL $EFS_MNT_DIR
+	[[ $? != 0 ]] && echo "error: copy to EFS" && exit 1
+	sudo umount $EFS_MNT_DIR
+	[[ $? != 0 ]] && echo "error: umount EFS" && exit 1
+	rm -rf $EFS_MNT_DIR
+}
+
+[[ $EXP == "efs" ]] && efs_export || s3_export
+
+# Cleanup artefacts
+echo "info: clean up"
+rm -f $TARBALL
+rm -rf $CSV_DIR
+[[ $? == 0 ]] && echo "info: export complete"

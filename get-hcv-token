@@ -1,0 +1,6 @@
+#!/bin/bash
+
+export VAULT_ADDR="https://hcvault.com:8200"
+export VAULT_NAMESPACE="namespace"
+export VAULT_TOKEN=`vault login -token-only -address=${VAULT_ADDR} -namespace=${VAULT_NAMESPACE} -method=aws`
+echo ${VAULT_TOKEN}

@@ -1,0 +1,20 @@
+#!/bin/bash
+
+git checkout master &>/dev/null
+git fetch
+git remote prune origin
+git branch --merged origin/master | grep -v 'master$' | xargs git branch -d
+
+REMOTE=$(git branch -r --merged origin/master | sed 's/ *origin\///' | grep -v 'master$')
+
+if [ "$REMOTE" ]; then
+	echo $REMOTE
+
+	read -p "Continue (y/N)? "
+	if [ "$REPLY" == "y" ]; then
+		git branch -r --merged origin/master | sed 's/ *origin\///' |
+			grep -v 'master$' | xargs -I% git push origin :% 2>&1 |
+			grep --colour=never 'deleted'
+		echo "Done!"
+	fi
+fi

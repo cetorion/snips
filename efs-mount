@@ -1,0 +1,27 @@
+#!/bin/bash
+
+SPTH=$(realpath "$0")
+SDIR=$(dirname $SPTH)
+SBSE=$(basename $SPTH)
+CONF="${SDIR}/${SBSE%.*}.conf"
+echo "conf: $CONF"
+
+EFS_ID=""
+
+# Check efs-utils is installed
+if ! command -v amazon-efs-utils &>/dev/null; then
+	echo "erro: amazon-efs-utils not found..."
+	exit 1
+fi
+
+# Mount EFS
+EFS_MNT_DIR="efs-mnt-dir-${RANDOM}"
+mkdir -p $EFS_MNT_DIR
+sudo mount -t efs -o tls ${EFS_ID}:/ $EFS_MNT_DIR
+if [[ $? != 0 ]]; then
+	echo "error: mount EFS"
+	rm -rf $EFS_MNT_DIR
+	exit 1
+fi
+
+echo "info: $EFS_MNT_DIR"

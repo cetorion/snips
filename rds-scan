@@ -1,0 +1,47 @@
+#!/usr/bin/env python
+
+import boto3
+import re
+
+rds = boto3.client('rds')
+#res = client.describe_db_instances()
+pages = rds.get_paginator('describe_db_instances').paginate()
+
+count = 0
+
+ids = {}
+dbs = {}
+for page in pages:
+
+    for inst in page['DBInstances']:
+        dbName = inst['DBInstanceIdentifier']
+
+        if 'perf' in dbName:
+            continue
+
+        arn = inst['DBInstanceArn']
+
+        tags = rds.list_tags_for_resource(ResourceName=arn)['TagList']
+        for tag in tags:
+            if tag['Key'] == 'ApplicationID':
+                appID = tag['Value']
+                
+        ids[appID] = []
+        dbs[dbName] = appID 
+        # dbType = inst['DBInstanceClass']
+        # dbStorage = inst['AllocatedStorage']
+        # dbEngine = inst['Engine']
+
+        print(dbName, " - ", appID)
+        count += 1
+for d in dbs:
+    ids[dbs[d]].append(d)
+    
+print("Count: ", count)
+print("App IDs: ", list(ids.keys()))
+print("App IDs disctibution:")
+for i in ids:
+    print("")
+    print("###", i, "###")
+    for v in ids[i]:
+        print(v)

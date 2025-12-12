@@ -1,0 +1,204 @@
+#!/bin/bash
+# Ruslan Sendecky
+
+### User Vars ###
+
+# Array of essential tags to check if they are empty
+#TAGS=(ApplicationID CostCentre)
+declare -A TAGS=(["ApplicationID"]="DL0319" ["CostCentre"]="V_ServiceEngines")
+
+# File to log incompliant buckets - without tags and over retention period threshold
+LOG_FILE="s3-bucket-incompliant.log"
+
+# File to log buckets that have missing tags but still being in use and within retention period
+USED_FILE="s3-bucket-inuse.log"
+
+# Retention months after which to delete
+RETENTION=12
+
+###
+
+usage() {
+	echo "
+	Description:
+		Examine in-compliant S3 buckets and take appropriate action
+		Analyse required tags and make sure they are not empty
+		Analyse last access time and unused threshold
+
+		Check if S3 bucket tags are missing
+		Check last access time if the bucket is within threshold period (been used recently)
+
+		Display, log or delete in-compliant S3 buckets
+	Usage:
+		${0##*/} [options]
+	Options:
+		-h	-	this
+		-d	-	delete incompliant S3 buckets with no tag and over atime threshold
+		-l	-	log output of incompliant buckets to a file
+		-u	-	display buckets that have missing tags but are still in use and under retention period
+		-w	-	update tags of incompliant S3 buckets that are still in use
+	"
+	exit 0
+}
+
+# Calculate retention time threshold from today
+RTT=$(date --date "$(date +%Y%m%d) -${RETENTION} month" +%Y%m%d)
+
+# Delete given bucket
+delete_bucket() {
+	local name=$1
+	if [[ -z $name ]]; then
+		echo "error: input params"
+		return
+	fi
+
+	aws s3 rm s3://${name} --recursive
+	if [[ $? != 0 ]]; then
+		echo "error: empty bucket"
+	fi
+
+	aws s3 rb s3://${name} --force
+	if [[ $? != 0 ]]; then
+		echo "error: delete bucket"
+	fi
+}
+
+# Get last access time of a given bucket
+get_atime() {
+	local name=$1
+	if [[ -z $name ]]; then
+		echo "error: input params"
+		return
+	fi
+
+	local raw=$(aws s3 ls $name --recursive | sort | tail -1 | cut -d ' ' -f 1)
+	local out=$(tr -d "-" <<<$raw)
+
+	if [[ -z $out ]]; then
+		out="00000000"
+	fi
+	echo $out
+}
+
+is_no_tag() {
+	local bucket=$1
+	local tag=$2
+	if [[ -z $bucket ]] || [[ -z $tag ]]; then
+		echo "error: input params"
+		return
+	fi
+	local value=$(aws s3api get-bucket-tagging --bucket $bucket 2>/dev/null | jq -r --arg k "$tag" '.TagSet[] | select(.Key == $k).Value')
+	echo $value
+}
+
+update_tags_1() {
+	data=$(aws s3api get-bucket-tagging --bucket $bucket | jq '.TagSet += [{"Key":"tag2", "Value": "value2"}]')
+	aws s3api put-bucket-tagging --bucket $bucket --tagging "$data"
+	aws s3api get-bucket-tagging --bucket $bucket
+}
+
+update_tags() {
+	local bucket=$1
+	if [[ -z $bucket ]]; then
+		echo "error: input params"
+		return
+	fi
+
+	local t v
+	for t in "${!TAGS[@]}"; do
+		read -p "Enter $t value or enter to accept default [${TAGS[$t]}]: " v
+		if [[ ! -z $v ]]; then
+			TAGS[$t]=$v
+		fi
+	done
+
+	local tags="TagSet=[{Key=Name,Value=$bucket},{Key=ApplicationID,Value=${TAGS["ApplicationID"]}},{Key=CostCentre,Value=${TAGS["CostCentre"]}}]"
+
+	aws s3api get-bucket-tagging --bucket $bucket &>/dev/null
+	if [[ $? != 0 ]]; then
+		aws s3api put-bucket-tagging --bucket $bucket --tagging "$tags"
+	else
+		echo "$bucket"
+		echo $(aws s3api get-bucket-tagging --bucket $bucket)
+	fi
+}
+
+# main #
+
+while (("$#")); do
+	case "$1" in
+	-d)
+		DO_DELETE=1
+		;;
+	-l)
+		DO_LOG=1
+		;;
+	-u)
+		DO_USED=1
+		;;
+	-w)
+		DO_UPDATE=1
+		;;
+	-h)
+		usage
+		;;
+	*)
+		:
+		;;
+	esac
+	shift
+done
+
+if ((DO_DELETE)); then
+	echo ''
+	echo "!!! The delete option is on. All Incompliant buckets will be deleted !!!"
+	echo "Are you sure that is what you want?"
+	echo "Press Ctrl-C withing 10 seconds to stop the counter and exit"
+	for _ in {1..10}; do
+		echo -n '.'
+		sleep 1
+	done
+	echo ''
+fi
+
+mark=0
+for b in $(aws s3api list-buckets | jq -r .Buckets[].Name); do
+
+	for t in "${!TAGS[@]}"; do
+
+		v=$(is_no_tag $b $t)
+		if [[ -z "$v" ]]; then
+			mark=1
+		fi
+	done
+
+	if ((!mark)); then
+		continue
+	fi
+
+	atm=$(get_atime $b)
+	if (($atm < $RTT)); then
+		if ((DO_LOG)); then
+			echo "$b $atm" | tee -a $LOG_FILE
+		else
+			echo "$b $atm"
+		fi
+		if ((DO_DELETE)); then
+			echo "!!! DELETING !!!"
+			delete_bucket $b
+		fi
+	else
+		if ((DO_USED)); then
+			if ((DO_LOG)); then
+				echo "$b $atm" | tee -a $USED_FILE
+			fi
+			echo "$b $atm"
+		fi
+		if ((DO_UPDATE)); then
+			update_tags $b
+		fi
+	fi
+
+	mark=0
+
+done

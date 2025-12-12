@@ -1,0 +1,132 @@
+#!/bin/bash
+
+# Security group to apply
+SGS=$1
+# RDS clusters to update
+RDS=()
+
+# Set source for RDS clusters
+# Either all clusters are updated or the list can be read from the cfg file
+# If the <script-name>.cfg file exists, the list is read from the file
+# If the file doesn't exist, all available clusters are updated
+set_source() {
+	local pth dir nme cfg r ans rds
+
+	pth=$(realpath "$0")
+	dir=$(dirname $pth)
+	nme=$(basename $pth)
+
+	# Fetch all RDS clusters
+	rds=($(aws rds describe-db-clusters \
+		--output text --query 'DBClusters[].{DBClusterIdentifier:DBClusterIdentifier}'))
+
+	cfg="${dir}/${nme%.*}.cfg"
+	echo "info: looking for $cfg"
+
+	if [[ -f $cfg ]]; then
+		echo "info: $cfg found"
+		echo "info: reading clusters from $cfg"
+		if [ -s $cfg ]; then
+			RDS=($(<${cfg}))
+		else
+			echo "error: $cfg is empty"
+			exit 1
+		fi
+
+		# Check if RDS names provided in the file are valid
+		for r in ${RDS[@]}; do
+			if [[ ! " ${rds[*]} " =~ " ${r} " ]]; then
+				echo "error: rds: $r is invalid"
+				exit 1
+			fi
+		done
+
+		return 0
+	fi
+
+	echo "info: $cfg not found. all available clusters will be used"
+	read -p "Enter 'Y' to proceed: " ans
+	if [[ $ans != "Y" ]]; then
+		exit 0
+	fi
+
+	RDS=("${rds[@]}")
+	if [[ ${#RDS[@]} == 0 ]]; then
+		echo "error: RDS array is empty"
+		exit 1
+	fi
+}
+
+# Add security group to a cluster
+update_cluster() {
+	local clr sgp err
+
+	clr=$1
+	if [[ -z $clr ]]; then
+		echo "error: cluster_add: empty cluster  parameter"
+		exit 1
+	fi
+
+	if [[ -z $SGS ]]; then
+		echo "error: cluster_add: empty security group parameter"
+		exit 1
+	fi
+
+	sgp=$(aws rds describe-db-clusters \
+		--output text --db-cluster-identifier "$clr" --query 'DBClusters[0].VpcSecurityGroups[].VpcSecurityGroupId')
+	err=$?
+	if [[ $err != 0 ]]; then
+		echo "error: cluster_add: get current SGs: $clr"
+	fi
+
+	aws rds modify-db-cluster \
+		--db-cluster-identifier "$clr" --vpc-security-group-ids $sgp $SGS &>/dev/null
+	err=$?
+	if [[ $err != 0 ]]; then
+		echo "error: cluster_add: update cluster: $clr"
+		echo "debug: retrying once"
+		aws rds modify-db-cluster \
+			--db-cluster-identifier "$clr" --vpc-security-group-ids $sgp $SGS
+	fi
+}
+
+# Set security group to apply
+set_sg() {
+	local isg sgrx
+
+	if [[ -z $SGS ]]; then
+		echo "info: security group is not provided as an argument"
+		echo "info: please provide a security group next"
+
+		read -p "Enter security group to add: " isg
+		if [[ -z $isg ]]; then
+			echo "error: empty input"
+			exit 1
+		else
+			SGS=$isg
+		fi
+	fi
+
+	sgrx='^sg-[0-9a-zA-Z]*$'
+	if [[ ! "$SGS" =~ $sgrx ]]; then
+		echo "error: security group: $SGS is invalid"
+		exit 1
+	fi
+
+	echo "info: using sg: $SGS"
+	read -p "Enter 'Y' to proceed: " ANS
+	if [[ $ANS != "Y" ]]; then
+		exit 0
+	fi
+}
+
+# main #
+
+set_sg
+set_source
+
+# Update clusters with the security group
+for C in ${RDS[@]}; do
+	echo "Applying $SGS to RDS: $C"
+	update_cluster "$C"
+done
